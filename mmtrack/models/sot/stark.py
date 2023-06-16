@@ -11,10 +11,16 @@ from mmdet.models.builder import build_backbone, build_head, build_neck
 from torch.nn.modules.batchnorm import _BatchNorm
 from torch.nn.modules.conv import _ConvNd
 from torchvision.transforms.functional import normalize
+import torch.nn.functional as F_resize
 
 from ..builder import MODELS
 from .base import BaseSingleObjectTracker
 
+from ultralytics import YOLO
+
+model = YOLO("/mnt/DATA/jas123/Downloads/mmtracking/yolov8x.pt") 
+#model = YOLO("/DATA/Arun/mmtracking/best.pt") 
+#model=YOLO("/SPCVLABdata/test1/Arun/mmtracking/yolov8n.pt") 
 
 @MODELS.register_module()
 class Stark(BaseSingleObjectTracker):
@@ -201,7 +207,9 @@ class Stark(BaseSingleObjectTracker):
             bbox (list | ndarray): in [cx, cy, w, h] format.
             conf_score (float): the confidence score of the predicted bbox.
         """
+       
         for i, update_interval in enumerate(self.update_intervals):
+            
             if self.frame_id % update_interval == 0 and conf_score > 0.5:
                 z_patch, _, z_mask = self.get_cropped_img(
                     img,
@@ -262,7 +270,16 @@ class Stark(BaseSingleObjectTracker):
         bbox[2] = bbox[0] + bbox_w
         bbox[3] = bbox[1] + bbox_h
         return bbox
-
+    def useyolo(self,img):
+        bbox1 = model.predict(img.cuda()) 
+        
+        bbox1 =bbox1[0].boxes.xywh
+        if(bbox1.nelement()==4):
+            bbox1 = bbox1[0,:]
+            bbox1[2] = bbox1[0] + bbox1[2]
+            bbox1[3] = bbox1[1] + bbox1[3]
+            
+        return bbox1
     def track(self, img, bbox):
         """Track the box `bbox` of previous frame to current frame `img`.
 
@@ -283,7 +300,15 @@ class Stark(BaseSingleObjectTracker):
             x_patch.squeeze() / 255.,
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]).unsqueeze(0)
-
+        # with torch.no_grad():
+        #     x_feat = self.extract_feat(x_patch)
+        #     x_dict = dict(feat=x_feat, mask=x_mask)
+        #     head_inputs = self.z_dict_list + [x_dict]
+        #     # run the transformer
+        #     track_results = self.head(head_inputs)
+        #     print()
+        #     print(track_results['pred_bboxes'])
+        #     print("**********")
         with torch.no_grad():
             x_feat = self.extract_feat(x_patch)
             x_dict = dict(feat=x_feat, mask=x_mask)
@@ -291,10 +316,29 @@ class Stark(BaseSingleObjectTracker):
             # run the transformer
             track_results = self.head(head_inputs)
 
+   
+  
         final_bbox = self.mapping_bbox_back(track_results['pred_bboxes'],
                                             self.memo.bbox, resize_factor)
+        
+        for i, update_interval in enumerate(self.update_intervals):
+            conf_score = -1.
+            if self.head.cls_head is not None:
+                conf_score = track_results['pred_logits'].view(-1).sigmoid().item()
+                print(conf_score)
+            if self.frame_id % 50 == 0 :
+                img1 = F_resize.interpolate(img, size=640) 
+               
+                bbox1 = self.useyolo(img1)
+        
+                if(bbox1.nelement()==4):
+                    bbox1[0] = bbox1[0]*(img.shape[3]/640.0)
+                    bbox1[1] = bbox1[1]*(img.shape[2]/640.0) 
+                    bbox1[2] = bbox1[2]*(img.shape[3]/640.0) 
+                    bbox1[3] = bbox1[3]*(img.shape[2]/640.0)
+                    final_bbox = bbox1
         final_bbox = self._bbox_clip(final_bbox, H, W, margin=10)
-
+        
         conf_score = -1.
         if self.head.cls_head is not None:
             # get confidence score (whether the search region is reliable)
@@ -414,6 +458,7 @@ class Stark(BaseSingleObjectTracker):
             - 'pred_logits': bboxes of (N, num_query, 1) shape.
         Typically `num_query` is equal to 1.
         '''
+        
         track_results = self.head(head_inputs)
 
         losses = dict()
